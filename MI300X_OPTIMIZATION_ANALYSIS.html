@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tinygrad AMD Backend vs MI300X: Optimization Gap Analysis</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 1100px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #1a1a2e; background: #f8f9fa; }
+  h1 { color: #e94560; border-bottom: 3px solid #e94560; padding-bottom: 10px; }
+  h2 { color: #0f3460; margin-top: 40px; border-left: 4px solid #e94560; padding-left: 12px; }
+  h3 { color: #16213e; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; }
+  th { background: #0f3460; color: white; padding: 12px 16px; text-align: left; }
+  td { padding: 10px 16px; border-bottom: 1px solid #eee; }
+  tr:hover { background: #f0f4ff; }
+  .good { color: #27ae60; font-weight: bold; }
+  .gap { color: #e94560; font-weight: bold; }
+  .mixed { color: #f39c12; font-weight: bold; }
+  code { background: #e8e8e8; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+  pre { background: #1a1a2e; color: #a8e6cf; padding: 16px; border-radius: 8px; overflow-x: auto; }
+  .summary-box { background: white; border: 2px solid #0f3460; border-radius: 8px; padding: 20px; margin: 20px 0; }
+  .section { background: white; border-radius: 8px; padding: 24px; margin: 20px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.8em; font-weight: bold; }
+  .badge-good { background: #d4edda; color: #155724; }
+  .badge-gap { background: #f8d7da; color: #721c24; }
+  .badge-mixed { background: #fff3cd; color: #856404; }
+  .perf-meter { height: 20px; background: #eee; border-radius: 10px; overflow: hidden; margin: 4px 0; }
+  .perf-fill { height: 100%; border-radius: 10px; }
+  .perf-green { background: linear-gradient(90deg, #27ae60, #2ecc71); }
+  .perf-red { background: linear-gradient(90deg, #e94560, #ff6b6b); }
+  .perf-yellow { background: linear-gradient(90deg, #f39c12, #f1c40f); }
+</style>
+</head>
+<body>
+
+<h1>Tinygrad AMD Backend vs MI300X: Optimization Gap Analysis</h1>
+
+<div class="summary-box">
+  <h3>Hardware Context</h3>
+  <p><strong>MI300X</strong> = CDNA 3 (gfx942) &mdash; 304 CUs, wave64, 1.3 PFLOPS FP16 matrix, 5.3 TB/s HBM3 bandwidth, 256 MB LLC</p>
+  <p><strong>Date</strong>: June 2026 &nbsp;|&nbsp; <strong>Tinygrad version</strong>: latest (tip of tree)</p>
+</div>
+
+<!-- SECTION 1 -->
+<div class="section">
+<h2>1. MFMA Tensor Core Usage <span class="badge badge-mixed">MOSTLY OPTIMIZED</span></h2>
+
+<table>
+  <tr><th>MI300x Capability</th><th>Status</th><th>Details</th></tr>
+  <tr><td>V_MFMA_F32_16x16x4_F16/BF16</td><td class="gap">Missing from tc.py</td><td>Not defined as a tensor core option</td></tr>
+  <tr><td>V_MFMA_F32_16x16x16_F16/BF16</td><td class="good">Used</td><td><code>amd_cdna_161616</code> in <code>tc.py:114-118</code></td></tr>
+  <tr><td>V_MFMA_F32_16x16x32_F16/BF16</td><td class="good">Used</td><td><code>amd_cdna_161632</code> in <code>tc.py:120-124</code></td></tr>
+  <tr><td>V_MFMA_F32_32x32x4_F16/BF16</td><td class="gap">Missing</td><td>No 32x32 tile variants defined</td></tr>
+  <tr><td>V_MFMA_F32_32x32x8_F16/BF16</td><td class="gap">Missing</td><td>No 32x32 tile variants defined</td></tr>
+  <tr><td>V_MFMA_F32_32x32x16_F16/BF16</td><td class="gap">Missing from TC opts</td><td>Autogen exists but no TC definition</td></tr>
+  <tr><td>FP8 MFMA (16x16x32, 32x32x16)</td><td class="good">Used</td><td><code>amd_cdna_161632</code> includes FP8</td></tr>
+  <tr><td>INT8 MFMA (V_MFMA_I32_*)</td><td class="gap">Missing from TC opts</td><td>No INT8 tensor core path</td></tr>
+  <tr><td>FP64 MFMA</td><td class="gap">Missing</td><td>No FP64 MFMA tensor core path</td></tr>
+  <tr><td>2:4 Structured Sparsity (V_SMFMAC_*)</td><td class="gap">Missing</td><td>No sparse MFMA support</td></tr>
+</table>
+
+<p><strong>Impact</strong>: The 32x32 MFMA variants (32x32x8, 32x32x16) can be more efficient for certain matrix shapes &mdash; they process more elements per MFMA instruction and can reduce instruction count.</p>
+</div>
+
+<!-- SECTION 2 -->
+<div class="section">
+<h2>2. Wavefront Size <span class="badge badge-good">OPTIMIZED</span></h2>
+
+<table>
+  <tr><th>Feature</th><th>MI300x</th><th>Tinygrad</th><th>Status</th></tr>
+  <tr><td>Wave64 (CDNA default)</td><td>Correct</td><td>Used for CDNA (<code>threads=64</code> in <code>tc.py</code>)</td><td class="good">Good</td></tr>
+  <tr><td>Wave32 (not native on MI300x)</td><td>N/A</td><td>Not set for CDNA (<code>elf.py:79</code>)</td><td class="good">Good</td></tr>
+</table>
+</div>
+
+<!-- SECTION 3 -->
+<div class="section">
+<h2>3. Memory Hierarchy Optimization <span class="badge badge-mixed">MIXED</span></h2>
+
+<table>
+  <tr><th>MI300x Feature</th><th>Tinygrad Status</th><th>Gap</th></tr>
+  <tr><td>5.3 TB/s HBM3</td><td>Measured ~128 GB/s in bandwidth test</td><td class="gap">MAJOR GAP &mdash; only ~2.4% peak utilization</td></tr>
+  <tr><td>256 MB LLC (Infinity Cache)</td><td>L2 cache enabled (<code>ip.py:135-140</code>)</td><td class="good">Good</td></tr>
+  <tr><td>16 KB vL1D per CU</td><td>No explicit L1 tuning</td><td>Relies on compiler</td></tr>
+  <tr><td>LDS (32 banks, 128 B/cycle)</td><td><code>shared_max = 65536</code></td><td class="good">LDS size limit correct</td></tr>
+  <tr><td>LDS bank conflict avoidance</td><td>Hand-tuned in <code>cdna_asm_gemm.py</code></td><td class="mixed">Only in extra/ benchmarks</td></tr>
+  <tr><td>Acquire/Release mem cache control</td><td>Fine-grained (<code>ops_amd.py:92-131</code>)</td><td class="good">Good</td></tr>
+  <tr><td>Scratch swizzle</td><td>Enabled (<code>SWIZZLE_ENABLE=1</code>)</td><td class="good">Good</td></tr>
+</table>
+
+<h3>Bandwidth Utilization</h3>
+<div class="perf-meter"><div class="perf-fill perf-red" style="width: 2.4%"></div></div>
+<p>~128 GB/s measured vs 5.3 TB/s peak = <strong>2.4%</strong> &mdash; indicates poor memory access patterns for general kernels.</p>
+</div>
+
+<!-- SECTION 4 -->
+<div class="section">
+<h2>4. Instruction-Level Parallelism <span class="badge badge-gap">SIGNIFICANT GAPS</span></h2>
+
+<table>
+  <tr><th>MI300x Capability</th><th>Tinygrad Status</th><th>Details</th></tr>
+  <tr><td>5-way issue (VALU+VMEM+SALU+LDS+Branch)</td><td class="gap">Not explicitly scheduled</td><td>Relies on compiler + LLVM</td></tr>
+  <tr><td>Dual VALU+VMEM issue</td><td class="gap">Not explicitly exploited</td><td>CDNA can overlap compute and memory</td></tr>
+  <tr><td>S_SET_PRIO (priority levels)</td><td class="mixed">Used in hand-tuned GEMM</td><td>Only in <code>cdna_asm_gemm.py</code>, not auto-generated</td></tr>
+  <tr><td>S_WAITCNT (fine-grained waits)</td><td class="gap">Autogen exists but not emitted by codegen</td><td><code>ops_python.py</code> emulator doesn't emit</td></tr>
+  <tr><td>S_NOP (pipeline interlocks)</td><td class="mixed">Used in hand-tuned GEMM</td><td>Not in auto-generated code</td></tr>
+</table>
+
+<p><strong>Impact</strong>: The auto-generated kernels from HIPCompiler/COMGR get LLVM's instruction scheduler, which handles basic ILP. But fine-grained <code>s_waitcnt</code> placement (like the hand-tuned GEMM does with <code>waitcnt(lgkm=4)</code> and <code>waitcnt(vm=9)</code>) is not done programmatically.</p>
+</div>
+
+<!-- SECTION 5 -->
+<div class="section">
+<h2>5. Tiling and Data Reuse <span class="badge badge-gap">MAJOR GAPS in auto-generated code</span></h2>
+
+<table>
+  <tr><th>Optimization</th><th>Hand-tuned GEMM</th><th>Auto-generated</th></tr>
+  <tr><td>256x256x64 tiles</td><td class="good">Yes (<code>cdna_asm_gemm.py:18</code>)</td><td class="gap">No &mdash; heuristic limits to smaller sizes</td></tr>
+  <tr><td>Double-buffered global&rarr;LDS</td><td class="good">Yes (PGR1/PGR2 pipeline)</td><td class="gap">No</td></tr>
+  <tr><td>Persistent kernel (Stream-K)</td><td class="good">Yes</td><td class="gap">No</td></tr>
+  <tr><td>Workgroup mapping for cache locality</td><td class="good">Yes (WGM mapping)</td><td class="gap">No</td></tr>
+  <tr><td>Stagger-unroll for L2 hit rate</td><td class="good">Yes</td><td class="gap">No</td></tr>
+  <tr><td>LDS swizzle for bank conflicts</td><td class="good">Yes (<code>ds_swizzle_b32</code>)</td><td class="gap">Not used in auto codegen</td></tr>
+</table>
+
+<p><strong>Impact</strong>: The hand-tuned <code>cdna_asm_gemm.py</code> demonstrates that 256x256 GEMM with double-buffering, persistent kernels, and cache-aware tiling is achievable. The auto-generated code path doesn't approach this level.</p>
+</div>
+
+<!-- SECTION 6 -->
+<div class="section">
+<h2>6. Data Types <span class="badge badge-good">GOOD COVERAGE</span></h2>
+
+<table>
+  <tr><th>Type</th><th>MI300x Support</th><th>Tinygrad TC Support</th></tr>
+  <tr><td>FP16</td><td>Yes</td><td class="good">Yes</td></tr>
+  <tr><td>BF16</td><td>Yes</td><td class="good">Yes</td></tr>
+  <tr><td>FP8E4M3</td><td>Yes</td><td class="good">Yes (CDNA3/4)</td></tr>
+  <tr><td>FP8E5M2</td><td>Yes</td><td class="good">Yes (CDNA3/4)</td></tr>
+  <tr><td>FP32</td><td>Yes (matrix)</td><td class="mixed">No explicit TC (scalar only)</td></tr>
+  <tr><td>INT8</td><td>Yes</td><td class="gap">Autogen exists, no TC path</td></tr>
+  <tr><td>FP64</td><td>Yes</td><td class="gap">No TC path</td></tr>
+  <tr><td>TF32</td><td>Yes (vector only)</td><td class="gap">No</td></tr>
+</table>
+</div>
+
+<!-- SECTION 7 -->
+<div class="section">
+<h2>7. Multi-XCC / Multi-GPU <span class="badge badge-good">OPTIMIZED</span></h2>
+
+<table>
+  <tr><th>Feature</th><th>Status</th></tr>
+  <tr><td>XCC-aware dispatch (<code>PRED_EXEC</code>)</td><td class="good">Yes (<code>ops_amd.py:71-78</code>)</td></tr>
+  <tr><td>Per-XCC scratch base</td><td class="good">Yes (<code>ops_amd.py:352-356</code>)</td></tr>
+  <tr><td>AQL dispatch (auto for multi-XCC)</td><td class="good">Yes (<code>ops_amd.py:989</code>)</td></tr>
+  <tr><td>XCC wave count formula</td><td class="good">Yes (<code>ops_amd.py:969</code>)</td></tr>
+</table>
+</div>
+
+<!-- SECTION 8 -->
+<div class="section">
+<h2>8. Compiler Backend <span class="badge badge-good">THREE PATHS</span></h2>
+
+<table>
+  <tr><th>Backend</th><th>Pros</th><th>Cons</th></tr>
+  <tr><td>HIPCompiler (COMGR)</td><td>Full LLVM optimizations, -O3</td><td>COMGR overhead, not always fastest</td></tr>
+  <tr><td>AMDLLVMCompiler</td><td>Direct LLVM, no COMGR dependency</td><td>Requires LLVM &ge; 18</td></tr>
+  <tr><td>HIPCCCompiler</td><td>Uses full hipcc toolchain</td><td>Subprocess overhead</td></tr>
+  <tr><td>ISA DSL (elf.py)</td><td>Direct instruction encoding</td><td>Only used in extra/ benchmarks</td></tr>
+</table>
+</div>
+
+<!-- SECTION 9 -->
+<div class="section">
+<h2>9. Occupancy <span class="badge badge-good">REASONABLE</span></h2>
+
+<table>
+  <tr><th>Factor</th><th>Status</th></tr>
+  <tr><td>Launch bounds</td><td class="good">Set via <code>amdgpu_flat_work_group_size(1, N)</code></td></tr>
+  <tr><td>Register pressure scan</td><td class="good">Yes (<code>elf.py:17-34</code>)</td></tr>
+  <tr><td>AccVGPR offset (CDNA)</td><td class="good">Yes (<code>elf.py:80-81</code>)</td></tr>
+  <tr><td><code>WAVES_PER_SH</code> env var</td><td class="mixed">Available but not auto-tuned</td></tr>
+</table>
+</div>
+
+<!-- SUMMARY -->
+<div class="section" style="border: 2px solid #0f3460;">
+<h2>Summary</h2>
+
+<h3>Well-Optimized <span class="badge badge-good">GOOD</span></h3>
+<ul>
+  <li>Core MFMA dispatch (16x16x16, 16x16x32, 16x16x128 for FP8)</li>
+  <li>Wave64 mode for CDNA</li>
+  <li>Cache management (acquire/release mem)</li>
+  <li>Multi-XCC support</li>
+  <li>FP8 conversion intrinsics</li>
+  <li>AccVGPR handling</li>
+  <li>ELF kernel descriptor packing</li>
+</ul>
+
+<h3>Major Gaps <span class="badge badge-gap">PERFORMANCE IMPACT</span></h3>
+<ol>
+  <li><strong>No double-buffered global&rarr;LDS pipeline</strong> in auto-generated kernels</li>
+  <li><strong>No persistent kernels</strong> / Stream-K work distribution</li>
+  <li><strong>No 32x32 MFMA tile variants</strong> in tensor core definitions</li>
+  <li><strong>No LDS bank conflict avoidance</strong> (swizzle) in auto-generated code</li>
+  <li><strong>No INT8 tensor core path</strong></li>
+  <li><strong>No fine-grained s_waitcnt</strong> emission in codegen</li>
+  <li><strong>Bandwidth utilization very low</strong> (~128 GB/s vs 5.3 TB/s peak) for general kernels</li>
+  <li><strong>No structured sparsity</strong> (2:4 sparsity) support despite hardware support</li>
+  <li><strong>LDS bank conflict swizzle</strong> not used (<code>ds_swizzle_b32</code>)</li>
+</ol>
+
+<h3>The Hand-Tuned Benchmarks Prove These Are Solvable</h3>
+<p>The <code>extra/gemm/cdna_asm_gemm.py</code> (1000+ lines of hand-written ISA) demonstrates:</p>
+<ul>
+  <li>256x256 tiles with 256 workgroups</li>
+  <li>Double-buffered PGR pipeline</li>
+  <li>Stream-K partitioning</li>
+  <li>LDS bank conflict avoidance via manual register placement</li>
+  <li>Stagger-unroll for L2 cache hit rate</li>
+  <li><code>s_setprio(3)</code> for maximum priority</li>
+</ul>
+
+<p><strong>The gap is between what the general auto-generated path achieves and what hand-tuned ISA demonstrates is possible on the hardware.</strong></p>
+</div>
+
+</body>
+</html>
