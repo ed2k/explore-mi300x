@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tinygrad vs vLLM: MI300X Optimization Comparison</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 1100px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #1a1a2e; background: #f8f9fa; }
+  h1 { color: #e94560; border-bottom: 3px solid #e94560; padding-bottom: 10px; }
+  h2 { color: #0f3460; margin-top: 40px; border-left: 4px solid #e94560; padding-left: 12px; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; }
+  th { background: #0f3460; color: white; padding: 12px 16px; text-align: left; }
+  td { padding: 10px 16px; border-bottom: 1px solid #eee; }
+  tr:hover { background: #f0f4ff; }
+  .good { color: #27ae60; font-weight: bold; }
+  .gap { color: #e94560; font-weight: bold; }
+  .mixed { color: #f39c12; font-weight: bold; }
+  code { background: #e8e8e8; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+  .section { background: white; border-radius: 8px; padding: 24px; margin: 20px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.8em; font-weight: bold; }
+  .badge-good { background: #d4edda; color: #155724; }
+  .badge-gap { background: #f8d7da; color: #721c24; }
+  .badge-mixed { background: #fff3cd; color: #856404; }
+  .verdict { background: #1a1a2e; color: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
+</style>
+</head>
+<body>
+
+<h1>Tinygrad vs vLLM: MI300X Optimization Comparison</h1>
+<p><strong>Both targeting MI300X (gfx942, CDNA3, 304 CUs, 1.3 PFLOPS FP16, 5.3 TB/s HBM3)</strong></p>
+<p><strong>Date</strong>: June 2026 &nbsp;|&nbsp; vLLM: latest main &nbsp;|&nbsp; Tinygrad: latest tip-of-tree</p>
+
+<!-- ======================================== -->
+<div class="section">
+<h2>1. Compute: Tensor Core / Matrix Engine Usage</h2>
+
+<table>
+  <tr><th>Feature</th><th>vLLM</th><th>Tinygrad</th><th>Gap</th></tr>
+  <tr>
+    <td>MFMA 16x16x16 (F16/BF16)</td>
+    <td class="good">Yes &mdash; via HIP/ROCm libs</td>
+    <td class="good">Yes &mdash; <code>tc.py:114</code></td>
+    <td class="good">Equal</td>
+  </tr>
+  <tr>
+    <td>MFMA 16x16x32 (F16/BF16/FP8)</td>
+    <td class="good">Yes &mdash; via hipBLASLt</td>
+    <td class="good">Yes &mdash; <code>tc.py:120</code></td>
+    <td class="good">Equal</td>
+  </tr>
+  <tr>
+    <td>MFMA 32x32 variants</td>
+    <td class="good">Yes &mdash; via hipBLASLt/ROCm libs</td>
+    <td class="gap">Missing from TC definitions</td>
+    <td class="gap">Tinygrad gap</td>
+  </tr>
+  <tr>
+    <td>FP8 E4M3/E5M2 compute</td>
+    <td class="good">Yes &mdash; FP8 MFMA via ROCm</td>
+    <td class="good">Yes &mdash; CDNA3 FP8 MFMA</td>
+    <td class="good">Equal</td>
+  </tr>
+  <tr>
+    <td>hipBLASLt online tuning</td>
+    <td class="good">Yes &mdash; <code>HIP_ONLINE_TUNING=1</code></td>
+    <td class="gap">No &mdash; uses generic COMGR/LLVM</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>AITER GEMM integration</td>
+    <td class="good">Yes &mdash; <code>VLLM_ROCM_USE_AITER_LINEAR</code></td>
+    <td class="gap">No AITER integration</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>Fused MoE kernels</td>
+    <td class="good">Yes &mdash; AITER fused MoE</td>
+    <td class="gap">No &mdash; MoE uses elementwise ops</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+</table>
+</div>
+
+<!-- ======================================== -->
+<div class="section">
+<h2>2. Attention: PagedAttention / Flash Attention</h2>
+
+<table>
+  <tr><th>Feature</th><th>vLLM</th><th>Tinygrad</th><th>Gap</th></tr>
+  <tr>
+    <td>PagedAttention (decode)</td>
+    <td class="good">Custom C++ kernel with <code>ll4mi</code> (LDS-based)</td>
+    <td class="gap">No PagedAttention implementation</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>Flash Attention (prefill)</td>
+    <td class="good">AITER Flash Attention with chunked prefill</td>
+    <td class="gap">No Flash Attention kernel</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>Unified Attention (mixed decode/prefill)</td>
+    <td class="good">AITER <code>unified_attention</code> Triton kernel</td>
+    <td class="gap">No unified attention</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>MLA (Multi-Latent Attention)</td>
+    <td class="good">AITER MLA + Triton MLA + sparse MLA</td>
+    <td class="gap">No MLA implementation</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>FP8 KV Cache</td>
+    <td class="good">FP8 E4M3/E5M2 + per-tensor/per-block scale</td>
+    <td class="mixed">FP8 compute support but no KV cache quantization</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>Sliding Window Attention</td>
+    <td class="good">Supported with Triton fallback</td>
+    <td class="gap">No sliding window support</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>CUDA Graph capture</td>
+    <td class="good">Full + piecewise graph support</td>
+    <td class="gap">No CUDA/HIP graph capture</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>Block sizes</td>
+    <td class="good">16, 32 (native); any MultipleOf(16) (Triton)</td>
+    <td class="gap">N/A &mdash; no paged attention</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+</table>
+
+<p><strong>Key Insight</strong>: vLLM's attention stack is its biggest MI300X advantage. The <code>ll4mi</code> kernel is a custom hand-tuned PagedAttention using LDS for MI300X. The AITER library provides optimized flash attention and MLA kernels. Tinygrad has none of these &mdash; it relies on generic GEMM-focused tensor cores.</p>
+</div>
+
+<!-- ======================================== -->
+<div class="section">
+<h2>3. Memory Optimization</h2>
+
+<table>
+  <tr><th>Feature</th><th>vLLM</th><th>Tinygrad</th><th>Gap</th></tr>
+  <tr>
+    <td>KV Cache management</td>
+    <td class="good">Block-based paged allocation with slot mapping</td>
+    <td class="gap">Generic buffer allocation (no paging)</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>Shuffle KV Cache layout</td>
+    <td class="good">AITER shuffle layout for LDS-friendly access</td>
+    <td class="gap">No shuffle layout</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>Reshape-and-cache</td>
+    <td class="good">Custom Triton kernels for cache updates</td>
+    <td class="gap">No cache update kernels</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>Memory bandwidth (measured)</td>
+    <td class="mixed">Not reported (application-level)</td>
+    <td class="gap">~128 GB/s (2.4% of peak)</td>
+    <td>&mdash;</td>
+  </tr>
+  <tr>
+    <td>AM driver (bypass ROCm)</td>
+    <td class="gap">No &mdash; uses ROCm stack</td>
+    <td class="good">Yes &mdash; direct KFD/DRM driver</td>
+    <td class="good">Tinygrad advantage</td>
+  </tr>
+  <tr>
+    <td>Scratch swizzle</td>
+    <td>N/A (uses ROCm memory allocator)</td>
+    <td class="good">Enabled (<code>SWIZZLE_ENABLE=1</code>)</td>
+    <td class="good">Tinygrad advantage</td>
+  </tr>
+</table>
+</div>
+
+<!-- ======================================== -->
+<div class="section">
+<h2>4. Quantization Support</h2>
+
+<table>
+  <tr><th>Feature</th><th>vLLM</th><th>Tinygrad</th><th>Gap</th></tr>
+  <tr>
+    <td>FP8 E4M3 / E5M2</td>
+    <td class="good">FP8 compute + FP8 KV cache + FP8 linear</td>
+    <td class="mixed">FP8 MFMA support, no FP8 linear/KV</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>GPTQ / AWQ</td>
+    <td class="good">Full support with Marlin kernels</td>
+    <td class="gap">No weight-only quantization</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>MX formats (MXFP4/MXFP8)</td>
+    <td class="good">Supported on gfx950 (MI350)</td>
+    <td class="gap">No MX format support</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>BitsAndBytes / TorchAO</td>
+    <td class="good">Supported</td>
+    <td class="gap">No</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>Fused output quantization</td>
+    <td class="good">FP8 static tensor symmetric</td>
+    <td class="gap">No</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+</table>
+</div>
+
+<!-- ======================================== -->
+<div class="section">
+<h2>5. Kernel-Level Optimizations</h2>
+
+<table>
+  <tr><th>Feature</th><th>vLLM</th><th>Tinygrad</th><th>Gap</th></tr>
+  <tr>
+    <td>Double-buffered global&rarr;LDS</td>
+    <td class="good">In custom attention/GEMM kernels</td>
+    <td class="gap">Only in extra/ benchmark kernels</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>LDS bank conflict avoidance</td>
+    <td class="good">In custom kernels (shuffle layout)</td>
+    <td class="gap">Only in hand-tuned benchmarks</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>Fused kernels (RMSNorm+Add)</td>
+    <td class="good">AITER fused_add_rms_norm</td>
+    <td class="gap">Separate ops</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>Fused RoPE+cache update</td>
+    <td class="good">AITER fused rope-and-cache</td>
+    <td class="gap">Separate ops</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>Fused grouped_topk (MoE gating)</td>
+    <td class="good">AITER grouped_topk</td>
+    <td class="gap">No fused gating kernel</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>Fused attention index computation</td>
+    <td class="good">ROCm sparse_attn_indexer</td>
+    <td class="gap">No</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>s_waitcnt / instruction scheduling</td>
+    <td class="good">Handled by ROCm compiler stack</td>
+    <td class="mixed">LLVM handles basics; hand-tuned GEMM has explicit waits</td>
+    <td class="mixed">Both rely on compiler</td>
+  </tr>
+  <tr>
+    <td>Persistent kernels / Stream-K</td>
+    <td class="good">In custom GEMM kernels</td>
+    <td class="gap">Only in extra/ benchmark</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+</table>
+</div>
+
+<!-- ======================================== -->
+<div class="section">
+<h2>6. Multi-GPU / Distributed</h2>
+
+<table>
+  <tr><th>Feature</th><th>vLLM</th><th>Tinygrad</th><th>Gap</th></tr>
+  <tr>
+    <td>TP (Tensor Parallelism)</td>
+    <td class="good">NCCL all-reduce / custom allreduce for MI300X</td>
+    <td class="gap">No tensor parallelism</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>PP (Pipeline Parallelism)</td>
+    <td class="good">Supported</td>
+    <td class="gap">No</td>
+    <td class="gap">vLLM only</td>
+  </tr>
+  <tr>
+    <td>XCC-aware dispatch</td>
+    <td class="mixed">Implicit via ROCm runtime</td>
+    <td class="good">Explicit <code>PRED_EXEC</code> + per-XCC scratch</td>
+    <td class="good">Tinygrad advantage</td>
+  </tr>
+  <tr>
+    <td>XGMI detection</td>
+    <td class="good">amdsmi-based topology check</td>
+    <td class="good">Hive detection (<code>amdev.py:241</code>)</td>
+    <td class="good">Equal</td>
+  </tr>
+  <tr>
+    <td>NUMA-aware placement</td>
+    <td class="good">amdsmi NUMA node query</td>
+    <td class="gap">No NUMA awareness</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+</table>
+</div>
+
+<!-- ======================================== -->
+<div class="section">
+<h2>7. Compilation & Runtime</h2>
+
+<table>
+  <tr><th>Feature</th><th>vLLM</th><th>Tinygrad</th><th>Gap</th></tr>
+  <tr>
+    <td>Compiler stack</td>
+    <td>ROCm (hipcc) + Triton + AITER (comgr)</td>
+    <td>COMGR + LLVM + ISA DSL + AM driver</td>
+    <td>Different approaches</td>
+  </tr>
+  <tr>
+    <td>Triton kernels</td>
+    <td class="good">Extensive &mdash; attention, cache ops, MoE</td>
+    <td class="gap">No Triton usage</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>Custom C++/HIP kernels</td>
+    <td class="good">PagedAttention (ll4mi), attention ops</td>
+    <td class="mixed">Only in extra/ benchmarks</td>
+    <td class="gap">vLLM advantage</td>
+  </tr>
+  <tr>
+    <td>Direct hardware access (bypass ROCm)</td>
+    <td class="gap">No</td>
+    <td class="good">Yes &mdash; AM driver, KFD, DRM</td>
+    <td class="good">Tinygrad advantage</td>
+  </tr>
+  <tr>
+    <td>BEAM search (kernel autotuning)</td>
+    <td class="gap">No (relies on tuned kernels)</td>
+    <td class="good">Yes &mdash; <code>search.py</code></td>
+    <td class="good">Tinygrad advantage</td>
+  </tr>
+  <tr>
+    <td>Offline autotuning</td>
+    <td class="good">hipBLASLt online tuning</td>
+    <td class="mixed">BEAM search at runtime</td>
+    <td>vLLM: offline; Tinygrad: online</td>
+  </tr>
+</table>
+</div>
+
+<!-- ======================================== -->
+<div class="section">
+<h2>8. Summary: Feature Coverage Matrix</h2>
+
+<table>
+  <tr>
+    <th>MI300X Optimization</th>
+    <th>vLLM Status</th>
+    <th>Tinygrad Status</th>
+    <th>Notes</th>
+  </tr>
+  <tr>
+    <td>MFMA 16x16x16/32 F16/BF16</td>
+    <td class="good">&#10004;</td>
+    <td class="good">&#10004;</td>
+    <td>Both have this</td>
+  </tr>
+  <tr>
+    <td>MFMA 32x32 variants</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>Missing TC definitions</td>
+  </tr>
+  <tr>
+    <td>FP8 MFMA (16x16x32)</td>
+    <td class="good">&#10004;</td>
+    <td class="good">&#10004;</td>
+    <td>Both have this</td>
+  </tr>
+  <tr>
+    <td>hipBLASLt online tuning</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM uses tuned GEMM library</td>
+  </tr>
+  <tr>
+    <td>AITER Flash Attention</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>PagedAttention (ll4mi)</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>AITER MLA</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>AITER Fused MoE</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>AITER fused_add_rms_norm</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>AITER fused rope+cache</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>FP8 KV cache quantization</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>GPTQ/AWQ weight quant</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>CUDA/HIP Graph capture</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>Tensor Parallelism (TP)</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>Sliding Window Attention</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr>
+    <td>LDS shuffle layout (KV cache)</td>
+    <td class="good">&#10004;</td>
+    <td class="gap">&#10008;</td>
+    <td>vLLM exclusive</td>
+  </tr>
+  <tr style="background: #f0f4ff;">
+    <td><strong>Direct AM driver (no ROCm)</strong></td>
+    <td class="gap">&#10008;</td>
+    <td class="good">&#10004;</td>
+    <td><strong>Tinygrad advantage</strong></td>
+  </tr>
+  <tr style="background: #f0f4ff;">
+    <td><strong>BEAM search autotuning</strong></td>
+    <td class="gap">&#10008;</td>
+    <td class="good">&#10004;</td>
+    <td><strong>Tinygrad advantage</strong></td>
+  </tr>
+  <tr style="background: #f0f4ff;">
+    <td><strong>Explicit XCC dispatch</strong></td>
+    <td class="mixed">~</td>
+    <td class="good">&#10004;</td>
+    <td><strong>Tinygrad advantage</strong></td>
+  </tr>
+  <tr style="background: #f0f4ff;">
+    <td><strong>Scratch swizzle</strong></td>
+    <td class="gap">&#10008;</td>
+    <td class="good">&#10004;</td>
+    <td><strong>Tinygrad advantage</strong></td>
+  </tr>
+</table>
+</div>
+
+<!-- ======================================== -->
+<div class="verdict">
+<h2>Verdict</h2>
+
+<p><strong>vLLM has 14 MI300X optimizations that tinygrad lacks.</strong></p>
+
+<p>The critical gaps are:</p>
+<ol>
+  <li><strong>AITER library</strong> &mdash; vLLM's secret weapon. Provides optimized Flash Attention, MLA, fused MoE, fused RMSNorm, fused RoPE+cache, and grouped_topk kernels specifically for MI300X. Tinygrad has nothing comparable.</li>
+  <li><strong>PagedAttention (ll4mi)</strong> &mdash; A hand-tuned LDS-based decode kernel for MI300X. Essential for LLM serving.</li>
+  <li><strong>hipBLASLt online tuning</strong> &mdash; vLLM enables runtime autotuning of GEMM operations. Tinygrad uses generic COMGR compilation.</li>
+  <li><strong>KV cache shuffle layout</strong> &mdash; LDS-friendly memory layout for attention kernels. Tinygrad doesn't have this.</li>
+  <li><strong>CUDA/HIP Graph capture</strong> &mdash; Reduces CPU-side launch overhead. Critical for decode throughput.</li>
+</ol>
+
+<p><strong>Tinygrad has 4 advantages:</strong></p>
+<ol>
+  <li><strong>Direct AM driver</strong> &mdash; Bypasses entire ROCm stack for lower latency and smaller footprint.</li>
+  <li><strong>BEAM search</strong> &mdash; Can discover better kernel configurations at runtime.</li>
+  <li><strong>Explicit XCC dispatch</strong> &mdash; Direct control over multi-XCC scheduling.</li>
+  <li><strong>Scratch swizzle</strong> &mdash; Better private memory access patterns.</li>
+</ol>
+
+<p><strong>Bottom line</strong>: vLLM is optimized for LLM serving on MI300X (attention + GEMM + quantization + fused kernels). Tinygrad is a general-purpose tensor compiler that can target MI300X but lacks the application-specific optimizations (paged attention, flash attention, fused kernels) that make vLLM fast for LLM inference. Tinygrad's strengths are in lower-level control (AM driver, BEAM search) that vLLM doesn't have.</p>
+</div>
+
+</body>
+</html>
